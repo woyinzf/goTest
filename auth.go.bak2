@@ -1,0 +1,135 @@
+package main
+
+import "github.com/dgrijalva/jwt-go"
+import "github.com/gorilla/context"
+
+import "net/http"
+import "strings"
+import "time"
+import (  
+    "database/sql"  
+    "fmt"  
+    _ "github.com/go-sql-driver/mysql"  
+) 
+
+type MyCustomClaims struct {
+    jwt.StandardClaims
+}
+
+func setToken(res http.ResponseWriter, req *http.Request) {
+    expireToken := time.Now().Add(time.Hour * 24).Unix()
+    expireCookie := time.Now().Add(time.Hour * 24)
+
+    claims := MyCustomClaims {
+        jwt.StandardClaims {
+            ExpiresAt: expireToken,
+            Issuer: "foshan.com",
+            Audience: "gateway",
+            Id: "abcde1357872222598",
+        },
+    }
+
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+    signedToken, _ := token.SignedString([]byte("secret1"))
+
+    fmt.Printf(signedToken)
+
+    cookie := http.Cookie{Name: "Auth", Value: signedToken, Expires: expireCookie, HttpOnly: true}
+    http.SetCookie(res, &cookie)
+
+    http.Redirect(res, req, "/profile", 301)
+}
+
+func validate(protectedPage http.HandlerFunc) http.HandlerFunc {
+    return http.HandlerFunc(func(res http.ResponseWriter, req *http.Request){
+
+        cookie, err := req.Cookie("Auth")
+        if err != nil {
+            http.NotFound(res, req)
+            return
+        }
+        
+        splitCookie := strings.Split(cookie.String(), "Auth=")
+
+        token, err := jwt.ParseWithClaims(splitCookie[1], &MyCustomClaims{}, func(token *jwt.Token) (interface{}, error){
+            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok{
+                return nil, fmt.Errorf("Unexpected signing method %v", token.Header["alg"])
+           }     
+           return []byte("secret1"), nil
+        }) 
+       
+        if claims, ok := token.Claims.(*MyCustomClaims); ok && token.Valid {
+            context.Set(req, "Claims", claims)    
+        } else {
+            http.NotFound(res, req)
+            return
+        }
+        protectedPage(res, req)
+    })    
+}
+
+func profile(res http.ResponseWriter, req *http.Request){
+    fmt.Print("xxxxxxxxxxx")
+    claims := context.Get(req, "Claims").(*MyCustomClaims)
+    res.Write([]byte(claims.StandardClaims.Issuer))
+    context.Clear(req)
+}
+
+func homePage(res http.ResponseWriter, req *http.Request){
+    res.Write([]byte("Home Page123"))
+}
+
+func rwMysql(res http.ResponseWriter, req *http.Request){
+    db, err := sql.Open("mysql", "root:pass123word01@tcp(172.16.192.104:3308)/gateway?charset=utf8")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	defer db.Close()
+ 
+    var isInsert = "1" //default 1 is not exist
+	var rows *sql.Rows
+	rows, err = db.Query("select * from gateway_nonce")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	for rows.Next() {
+		var nonce string
+		var id int
+		rows.Scan(&id, &nonce)
+        //if nonce hava been black dont insert table
+        if strings.EqualFold(nonce,"joe1") {
+            isInsert = "2"    // status 2 is exist
+            break
+        }
+    }
+    
+    if strings.EqualFold(isInsert,"1") {
+        var result sql.Result
+        result, err = db.Exec("insert into gateway_nonce(nonce) values(?)", "joe1")
+        if err != nil {
+            fmt.Println(err)
+            return
+        }
+        lastId, _ := result.LastInsertId()
+        fmt.Println("insert record's id:", lastId)
+        
+    }else {
+        fmt.Println("this record is exist!!!")
+    }
+
+	rows.Close()
+ 
+}
+  
+func main(){
+    http.HandleFunc("/profile", validate(profile))
+    http.HandleFunc("/setToken", setToken)    
+    http.HandleFunc("/", homePage)
+    http.HandleFunc("/rwMysql", rwMysql)
+    http.ListenAndServe(":8080", nil)
+}
